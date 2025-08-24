@@ -1,0 +1,417 @@
+Create Database, Schema & Common Object
+
+-- use sysadmin role.
+use role sysadmin;
+
+-- create a warehouse if not exist 
+create warehouse if not exists adhoc_wh
+     comment = 'This is the adhoc-wh'
+     warehouse_size = 'x-small' 
+     auto_resume = true 
+     auto_suspend = 60 
+     enable_query_acceleration = false 
+     warehouse_type = 'standard' 
+     min_cluster_count = 1 
+     max_cluster_count = 1 
+     scaling_policy = 'standard'
+     initially_suspended = true;
+
+--
+
+USE ROLE SYSADMIN;
+
+CREATE DATABASE RETAIL_DW;
+CREATE SCHEMA RETAIL_DW.BRONZE;
+CREATE SCHEMA RETAIL_DW.SILVER;
+CREATE SCHEMA RETAIL_DW.GOLD;
+
+
+--DROP STAGE IF EXISTS retail_dw.gold.retail_stage;
+USE DATABASE retail_dw
+CREATE OR REPLACE STAGE RETAIL_STAGE;
+
+--CSV FILE FORMMATING
+
+USE DATABASE RETAIL_DW;
+USE SCHEMA PUBLIC;
+
+CREATE OR REPLACE FILE FORMAT CSV_FILE_FORMAT
+TYPE = 'CSV'
+FIELD_OPTIONALLY_ENCLOSED_BY = '"'
+SKIP_HEADER = 1
+FIELD_DELIMITER = ','
+NULL_IF = ('NULL','NULL')
+EMPTY_FIELD_AS_NULL = TRUE
+
+--====================================
+--BRONZE---------------------------------==========
+--======================================
+
+USE DATABASE RETAIL_DW;
+USE SCHEMA BRONZE;
+
+-- Customer Dimension
+CREATE OR REPLACE TABLE dim_customer_raw (
+    customer_id STRING,
+    customer_name STRING,
+    customer_email STRING, 
+    customer_phone STRING,
+    customer_address STRING
+);
+
+-- Product Dimension
+CREATE OR REPLACE TABLE dim_product_raw (
+    product_id INT,
+    product_name STRING,
+    category STRING,
+    price DECIMAL(10,2)
+);
+
+-- Store Dimension
+CREATE OR REPLACE TABLE dim_store_raw (
+    store_id INT,
+    store_name STRING,
+    store_location STRING
+);
+
+-- Date Dimension
+CREATE OR REPLACE TABLE dim_date_raw (
+    date_id INT,
+    calendar_date DATE,
+    month INT,
+    quarter INT,
+    year INT
+);
+
+-- Fact Sales
+CREATE OR REPLACE TABLE fact_sales_raw (
+    sales_id INT,
+    customer_id INT,
+    product_id INT,
+    store_id INT,
+    date_id INT,
+    sales_amount DECIMAL(10,2),
+    quantity INT
+);
+
+
+--INSERTING RAW DATA INTO BRONZE 
+
+USE DATABASE RETAIL_DW;
+USE SCHEMA BRONZE;
+
+
+COPY INTO dim_customer_raw
+FROM @RETAIL_DW.PUBLIC.RETAIL_STAGE/dim_customer.csv
+FILE_FORMAT = (TYPE = CSV FIELD_OPTIONALLY_ENCLOSED_BY='"' SKIP_HEADER=1)
+ON_ERROR = 'CONTINUE';
+
+
+COPY INTO dim_product_raw
+FROM @RETAIL_DW.PUBLIC.RETAIL_STAGE/dim_product.csv
+FILE_FORMAT = (TYPE = CSV FIELD_OPTIONALLY_ENCLOSED_BY='"' SKIP_HEADER=1)
+ON_ERROR = 'CONTINUE';
+
+select * from dim_product_raw
+
+LIST @RETAIL_DW.PUBLIC.RETAIL_STAGE
+
+
+COPY INTO DIM_STORE_RAW
+FROM @RETAIL_DW.PUBLIC.RETAIL_STAGE/dim_store.csv
+FILE_FORMAT = (TYPE = CSV FIELD_OPTIONALLY_ENCLOSED_BY = '"' SKIP_HEADER = 1)
+ON_ERROR = 'CONTINUE';
+
+
+COPY INTO DIM_Date_RAW
+FROM @RETAIL_DW.PUBLIC.RETAIL_STAGE/dim_date.csv
+FILE_FORMAT = (TYPE = CSV FIELD_OPTIONALLY_ENCLOSED_BY = '"' SKIP_HEADER = 1)
+ON_ERROR = 'CONTINUE';
+
+
+COPY INTO FACT_SALES_RAW
+FROM @RETAIL_DW.PUBLIC.RETAIL_STAGE/fact_sales_raw.csv
+FILE_FORMAT = (TYPE = CSV FIELD_OPTIONALLY_ENCLOSED_BY = '"' SKIP_HEADER = 1)
+ON_ERROR = 'CONTINUE';
+
+
+delete from dim_customer_raw where customer_id = 'customer_id'
+
+select * from dim_customer_raw
+
+--------============================
+--SILVER==========================
+====================================
+
+USE ROLE ACCOUNTADMIN;
+USE DATABASE RETAIL_DW;
+
+USE SCHEMA SILVER;
+
+CREATE OR REPLACE TABLE DIM_CUSTOMER AS
+SELECT DISTINCT
+    CUSTOMER_ID ,
+    INITCAP(CUSTOMER_NAME) AS CUSTOMER_NAME,
+    LOWER(CUSTOMER_EMAIL) AS CUSTOMER_EMAIL,
+    CUSTOMER_PHONE,
+    CUSTOMER_ADDRESS,
+    FROM BRONZE.DIM_CUSTOMER_RAW
+WHERE BRONZE.DIM_CUSTOMER_RAW.CUSTOMER_ID IS NOT NULL;
+
+CREATE OR REPLACE TABLE SILVER.dim_product AS
+SELECT DISTINCT
+    product_id,
+    INITCAP(product_name) AS product_name,
+    INITCAP(category) AS category,
+    price
+FROM BRONZE.dim_product_raw
+WHERE product_id IS NOT NULL;
+
+CREATE OR REPLACE TABLE SILVER.dim_store AS
+SELECT DISTINCT
+    store_id,
+    INITCAP(store_name) AS store_name,
+    INITCAP(store_location) AS store_location
+FROM BRONZE.dim_store_raw
+WHERE store_id IS NOT NULL;
+
+CREATE OR REPLACE TABLE SILVER.dim_date AS
+SELECT DISTINCT
+    date_id,
+    calendar_date,
+    month,
+    quarter,
+    year
+FROM BRONZE.dim_date_raw
+WHERE date_id IS NOT NULL;
+
+
+CREATE OR REPLACE TABLE SILVER.fact_sales AS
+SELECT
+    sales_id,
+    customer_id,
+    product_id,
+    store_id,
+    date_id,
+    sales_amount,
+    quantity
+FROM BRONZE.fact_sales_raw
+WHERE sales_id IS NOT NULL;
+
+
+SELECT * 
+FROM dim_customer 
+
+ALTER SESSION SET TIMEZONE = 'Asia/Kolkata'
+
+update SILVER.DIM_CUSTOMER
+set customer_email = 'ray@yahoo.com'
+where customer_name = 'Debbie Young'
+
+
+----------=================================================================================
+-----------------------------------------GOLD============================================--
+--========================================================================================
+
+USE ROLE ACCOUNTADMIN;
+USE DATABASE RETAIL_DW;
+
+USE SCHEMA GOLD;
+
+CREATE OR REPLACE SEQUENCE GOLD.SEQ_DIM_CUSTOMER_SK;
+CREATE OR REPLACE SEQUENCE GOLD.SEQ_DIM_PRODUCT_SK;
+CREATE OR REPLACE SEQUENCE GOLD.SEQ_DIM_STORE_SK;
+
+CREATE OR REPLACE TABLE DIM_CUSTOMER AS 
+SELECT GOLD.SEQ_DIM_CUSTOMER_SK.NEXTVAL AS CUSTOMER_SK,
+  s.CUSTOMER_ID,
+  s.CUSTOMER_NAME,
+  s.CUSTOMER_EMAIL,
+  s.CUSTOMER_PHONE,
+  s.CUSTOMER_ADDRESS
+FROM SILVER.DIM_CUSTOMER s;
+
+SELECT * FROM DIM_CUSTOMER
+
+UPDATE DIM_CUSTOMER
+SET END_DATE = NULL
+   
+WHERE CUSTOMER_ID = 1;
+
+
+
+update DIM_CUSTOMER
+set customer_email = 'michael499@hotmail.com'
+where customer_name = 'Alan Webb'
+
+-- PRODUCT DIM
+CREATE OR REPLACE TABLE GOLD.DIM_PRODUCT AS
+SELECT
+  GOLD.SEQ_DIM_PRODUCT_SK.NEXTVAL AS PRODUCT_SK,
+  s.PRODUCT_ID,
+  s.PRODUCT_NAME,
+  s.CATEGORY,
+  s.PRICE
+FROM SILVER.DIM_PRODUCT s;
+
+-- STORE DIM
+CREATE OR REPLACE TABLE GOLD.DIM_STORE AS
+SELECT
+  GOLD.SEQ_DIM_STORE_SK.NEXTVAL AS STORE_SK,
+  s.STORE_ID,
+  s.STORE_NAME,
+  s.STORE_LOCATION
+FROM SILVER.DIM_STORE s;
+
+-- DATE DIM (often the natural key is fine)
+CREATE OR REPLACE TABLE GOLD.DIM_DATE AS
+SELECT
+  s.DATE_ID     AS DATE_SK,      -- use natural key as SK
+  s.CALENDAR_DATE,
+  s.MONTH,
+  s.QUARTER,
+  s.YEAR
+FROM SILVER.DIM_DATE s;
+
+USE ROLE ACCOUNTADMIN;
+CREATE OR REPLACE TABLE FACT_SALES LIKE SILVER.FACT_SALES;
+
+INSERT INTO GOLD.FACT_SALES
+SELECT * FROM SILVER.FACT_SALES
+
+
+
+SELECT CURRENT_ACCOUNT() || '.' || CURRENT_REGION();
+--
+drop table DIM_CUSTOMER_raw
+select * from DIM_CUSTOMER
+ALTER SESSION SET TIMEZONE = 'Asia/Kolkata'
+
+DROP SEQUENCE IF EXISTS GOLD.SEQ_DIM_CUSTOMER_SK;
+
+--DELETE FROM DIM_CUSTOMER WHERE CUSTOMER_SK = 202 AND CUSTOMER_NAME = 'ALAN WEBB';
+select * from DIM_CUSTOMER
+
+CREATE SEQUENCE GOLD.SEQ_DIM_CUSTOMER_SK START = 1 INCREMENT = 1;
+
+select CURRENT_ACCOUNT() || '.' || CURRENT_REGION()
+https://lp06138.central-india.azure.snowflakecomputing.com/oauth/authorize
+
+SHOW WAREHOUSES
+SHOW GRANTS TO USER Hjoshi8795 ;
+
+USE ROLE ACCOUNTADMIN;
+USE WAREHOUSE compute_wh
+
+
+LP06138.AZURE_CENTRALINDIA.snowflakecomputing.com
+
+-- making scd because we wnt to store historical data 
+
+-- Add extra metadata columns to GOLD dimension
+INSERT INTO DIM_CUSTOMER (
+    CUSTOMER_SK,
+    CUSTOMER_ID,
+    CUSTOMER_NAME,
+    CUSTOMER_EMAIL,
+    CUSTOMER_PHONE,
+    CUSTOMER_ADDRESS,
+    START_DATE,
+    END_DATE,
+    IS_CURRENT
+)
+SELECT 
+    GOLD.SEQ_DIM_CUSTOMER_SK.NEXTVAL,
+    CUSTOMER_ID,
+    CUSTOMER_NAME,
+    'michael499@hotmail.com',     -- new email
+    CUSTOMER_PHONE,               -- carry forward from old row
+    CUSTOMER_ADDRESS,             -- carry forward from old row
+    CURRENT_DATE,
+    NULL,
+    'Y'
+FROM DIM_CUSTOMER
+WHERE CUSTOMER_NAME = 'Alan Webb'
+  AND END_DATE = CURRENT_DATE;
+
+
+
+
+
+
+
+---------------
+
+
+
+SELECT * FROM FACT_SALES
+
+--------------------------------------------------------------
+--------------------------SCD-----------------------------------
+=------==================================================
+
+USE ROLE ACCOUNTADMIN;
+
+MERGE INTO GOLD.DIM_CUSTOMER AS TARGET
+USING SILVER.DIM_CUSTOMER AS SOURCE 
+ON TARGET.CUSTOMER_ID = SOURCE.CUSTOMER_ID
+AND TARGET.IS_CURRENT = 'Y'
+
+WHEN MATCHED AND (
+        TARGET.CUSTOMER_NAME    <> SOURCE.CUSTOMER_NAME
+    OR TARGET.CUSTOMER_EMAIL   <> SOURCE.CUSTOMER_EMAIL
+    OR TARGET.CUSTOMER_PHONE   <> SOURCE.CUSTOMER_PHONE
+    OR TARGET.CUSTOMER_ADDRESS <> SOURCE.CUSTOMER_ADDRESS
+) THEN
+
+UPDATE SET 
+TARGET.END_DATE = SYSDATE(),
+TARGET.IS_CURRENT = 'N';
+
+
+--WHEN NOT MATCHED THEN
+
+    INSERT INTO GOLD.DIM_CUSTOMER (
+        CUSTOMER_SK,
+        CUSTOMER_ID,
+        CUSTOMER_NAME,
+        CUSTOMER_EMAIL,
+        CUSTOMER_PHONE,
+        CUSTOMER_ADDRESS,
+        START_DATE,
+        END_DATE,
+        IS_CURRENT
+    )
+    SELECT 
+        GOLD.SEQ_DIM_CUSTOMER_SK.NEXTVAL,
+        SOURCE.CUSTOMER_ID,
+        SOURCE.CUSTOMER_NAME,
+        SOURCE.CUSTOMER_EMAIL,
+        SOURCE.CUSTOMER_PHONE,
+        SOURCE.CUSTOMER_ADDRESS,
+        CURRENT_DATE,
+        NULL,
+        'Y'
+
+
+ 
+FROM SILVER.DIM_CUSTOMER SOURCE 
+    LEFT JOIN GOLD.DIM_CUSTOMER TARGET
+        ON SOURCE.CUSTOMER_ID = TARGET.CUSTOMER_ID
+    AND TARGET.IS_CURRENT = 'Y'
+
+WHERE TARGET.CUSTOMER_ID IS NULL
+    OR TARGET.CUSTOMER_NAME    <> SOURCE.CUSTOMER_NAME
+       OR TARGET.CUSTOMER_EMAIL   <> SOURCE.CUSTOMER_EMAIL
+       OR TARGET.CUSTOMER_PHONE   <> SOURCE.CUSTOMER_PHONE
+       OR TARGET.CUSTOMER_ADDRESS <> SOURCE.CUSTOMER_ADDRESS;
+
+
+
+
+
+
+---------------------------------------
+
+
+
